@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Env
+.env
+
+# Data / outputs
+data/
+*.mp4
+*.png
+*.jpg
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
