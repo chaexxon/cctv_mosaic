@@ -18,3 +18,9 @@ data/
 # OS
 .DS_Store
 Thumbs.db
+
+# Project outputs / artifacts
+mosaic_*_test.png
+data/
+models/
+.env.example
