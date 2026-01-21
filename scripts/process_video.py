@@ -3,41 +3,64 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 import cv2
 
 from utils.video import open_capture, get_video_info, iter_frames, make_writer, safe_release
 from services.mosaic import apply_mosaic, MosaicMode, BBox
 from services.face_detector import FaceDetector
+from services.tracker import IoUTracker
 
 
 def _demo_targets(video_info, box_w_ratio=0.25, box_h_ratio=0.45) -> Dict[int, List[BBox]]:
-    """
-    Create dummy mosaic targets for demo:
-    - Apply a big mosaic box for MANY consecutive frames
-    """
     w, h = video_info.width, video_info.height
     bw = int(w * box_w_ratio)
     bh = int(h * box_h_ratio)
 
-    # 🔹 중앙 (원하면 왼쪽으로 바꿀 수 있음)
     cx, cy = w // 2, h // 2
-    # cx, cy = w // 4, h // 2   # ← 왼쪽에 걸리게 하고 싶으면 이 줄로
-
     x1 = cx - bw // 2
     y1 = cy - bh // 2
     x2 = cx + bw // 2
     y2 = cy + bh // 2
 
     targets: Dict[int, List[BBox]] = {}
-
-    # 🔥 핵심: 연속 프레임에 모자이크 적용
-    # 대략 0.5초 ~ 4초 구간
     for frame_idx in range(15, 120):
         targets[frame_idx] = [(x1, y1, x2, y2)]
-
     return targets
+
+
+def _draw_tracks(frame, tracks, *, det_conf: float, color=(0, 0, 255)):
+    """
+    Draw tracked boxes and track_id on frame (debug).
+    """
+    for t in tracks:
+        if "bbox" not in t:
+            continue
+        x1, y1, x2, y2 = t["bbox"]
+        tid = t.get("track_id", -1)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
+        cv2.putText(
+            frame,
+            f"id={tid}",
+            (x1, max(0, y1 - 10)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            color,
+            2,
+            cv2.LINE_AA,
+        )
+    cv2.putText(
+        frame,
+        f"tracks={len(tracks)} conf>={det_conf:.2f}",
+        (20, 40),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        1.0,
+        color,
+        2,
+        cv2.LINE_AA,
+    )
+    return frame
 
 
 def process_video(
@@ -48,14 +71,12 @@ def process_video(
     pixelate_scale: float = 0.12,
     codec: str = "mp4v",
     use_demo_boxes: bool = False,
+    det_conf: float = 0.30,
+    track_iou: float = 0.30,
+    track_max_miss: int = 10,
+    draw_boxes: bool = False,
+    print_every: int = 0,
 ) -> str:
-    """
-    B-side processor (demo + detector hook):
-    - Read input video
-    - (optional) apply demo mosaic boxes
-    - apply detector-produced boxes (currently empty)
-    - Write output video
-    """
     cap = None
     writer = None
     try:
@@ -73,23 +94,38 @@ def process_video(
             is_color=True,
         )
 
-        # detector (현재는 빈 리스트 반환이지만, 구조를 미리 고정)
-        detector = FaceDetector(conf_thres=0.5)
+        detector = FaceDetector(conf_thres=det_conf)
+        tracker = IoUTracker(iou_thres=track_iou, max_miss=track_max_miss)
 
-        # demo targets (옵션)
         demo_targets = _demo_targets(info) if use_demo_boxes else {}
 
         for idx, frame in iter_frames(cap):
             boxes: List[BBox] = []
 
-            # 1) demo boxes
+            # demo boxes
             if use_demo_boxes:
                 boxes.extend(demo_targets.get(idx, []))
 
-            # 2) detector boxes
+            # detector -> tracker
             dets = detector.detect(frame)
-            boxes.extend([d["bbox"] for d in dets if d.get("cls") == "face" and d.get("conf", 0) >= 0.5])
+            face_dets = [
+                d for d in dets
+                if d.get("cls") == "face" and d.get("conf", 0.0) >= det_conf and "bbox" in d
+            ]
+            tracks = tracker.update(face_dets)
 
+            track_boxes = [t["bbox"] for t in tracks if "bbox" in t]
+            boxes.extend(track_boxes)
+
+            # DEBUG: draw boxes (tracker output)
+            if draw_boxes:
+                _draw_tracks(frame, tracks, det_conf=det_conf)
+
+            # DEBUG: print stats
+            if print_every > 0 and (idx % print_every == 0):
+                print(f"[frame {idx}] dets={len(dets)} face_dets={len(face_dets)} tracks={len(tracks)}")
+
+            # mosaic
             if boxes:
                 frame = apply_mosaic(frame, boxes, mode=mode, pixelate_scale=pixelate_scale)
 
@@ -102,13 +138,21 @@ def process_video(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="B: process video (demo + detector hook)")
+    parser = argparse.ArgumentParser(description="B: process video (YOLO face + IoU tracker + mosaic)")
     parser.add_argument("--in", dest="inp", required=True, help="input video path")
     parser.add_argument("--out", dest="out", required=True, help="output video path")
     parser.add_argument("--mode", choices=["blur", "pixelate"], default="blur", help="mosaic mode")
     parser.add_argument("--pixel_scale", type=float, default=0.12, help="pixelate scale (0.02~0.5)")
     parser.add_argument("--codec", type=str, default="mp4v", help="fourcc codec (mp4v, avc1, XVID...)")
     parser.add_argument("--use_demo", action="store_true", help="apply demo mosaic boxes (center box)")
+
+    parser.add_argument("--det_conf", type=float, default=0.30, help="YOLO face confidence threshold")
+    parser.add_argument("--track_iou", type=float, default=0.30, help="IoU match threshold (tracker)")
+    parser.add_argument("--track_max_miss", type=int, default=10, help="max missed frames to keep a track")
+
+    parser.add_argument("--draw_boxes", action="store_true", help="draw tracker boxes + ids (debug)")
+    parser.add_argument("--print_every", type=int, default=0, help="print stats every N frames (0=off)")
+
     args = parser.parse_args()
 
     out_path = process_video(
@@ -118,6 +162,11 @@ def main():
         pixelate_scale=args.pixel_scale,
         codec=args.codec,
         use_demo_boxes=args.use_demo,
+        det_conf=args.det_conf,
+        track_iou=args.track_iou,
+        track_max_miss=args.track_max_miss,
+        draw_boxes=args.draw_boxes,
+        print_every=args.print_every,
     )
     print(f"Saved output: {out_path}")
 
