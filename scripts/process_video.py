@@ -33,6 +33,7 @@ def _demo_targets(video_info, box_w_ratio=0.25, box_h_ratio=0.45) -> Dict[int, L
 def _draw_tracks(frame, tracks, *, det_conf: float, color=(0, 0, 255)):
     """
     Draw tracked boxes and track_id on frame (debug).
+    NOTE: Call this AFTER mosaic so the debug overlay remains sharp.
     """
     for t in tracks:
         if "bbox" not in t:
@@ -71,7 +72,7 @@ def process_video(
     pixelate_scale: float = 0.12,
     codec: str = "mp4v",
     use_demo_boxes: bool = False,
-    det_conf: float = 0.30,
+    det_conf: float = 0.60,
     track_iou: float = 0.30,
     track_max_miss: int = 10,
     draw_boxes: bool = False,
@@ -94,6 +95,8 @@ def process_video(
             is_color=True,
         )
 
+        # FaceDetector 내부에서:
+        # - YOLO conf prefilter + 후처리(min_area_ratio, aspect ratio) 적용됨
         detector = FaceDetector(conf_thres=det_conf)
         tracker = IoUTracker(iou_thres=track_iou, max_miss=track_max_miss)
 
@@ -102,32 +105,30 @@ def process_video(
         for idx, frame in iter_frames(cap):
             boxes: List[BBox] = []
 
-            # demo boxes
+            # 0) demo boxes (선택)
             if use_demo_boxes:
                 boxes.extend(demo_targets.get(idx, []))
 
-            # detector -> tracker
+            # 1) detector -> tracker
             dets = detector.detect(frame)
-            face_dets = [
-                d for d in dets
-                if d.get("cls") == "face" and d.get("conf", 0.0) >= det_conf and "bbox" in d
-            ]
+            face_dets = [d for d in dets if d.get("cls") == "face" and "bbox" in d]
             tracks = tracker.update(face_dets)
 
+            # 2) mosaic targets = tracker boxes (+ demo boxes)
             track_boxes = [t["bbox"] for t in tracks if "bbox" in t]
             boxes.extend(track_boxes)
 
-            # DEBUG: draw boxes (tracker output)
+            # 3) mosaic 먼저 적용 (debug overlay가 안 흐려지게)
+            if boxes:
+                frame = apply_mosaic(frame, boxes, mode=mode, pixelate_scale=pixelate_scale)
+
+            # 4) debug overlay는 마지막에 (선명하게 보이게)
             if draw_boxes:
                 _draw_tracks(frame, tracks, det_conf=det_conf)
 
-            # DEBUG: print stats
+            # 5) debug print
             if print_every > 0 and (idx % print_every == 0):
                 print(f"[frame {idx}] dets={len(dets)} face_dets={len(face_dets)} tracks={len(tracks)}")
-
-            # mosaic
-            if boxes:
-                frame = apply_mosaic(frame, boxes, mode=mode, pixelate_scale=pixelate_scale)
 
             writer.write(frame)
 
@@ -144,12 +145,14 @@ def main():
     parser.add_argument("--mode", choices=["blur", "pixelate"], default="blur", help="mosaic mode")
     parser.add_argument("--pixel_scale", type=float, default=0.12, help="pixelate scale (0.02~0.5)")
     parser.add_argument("--codec", type=str, default="mp4v", help="fourcc codec (mp4v, avc1, XVID...)")
-    parser.add_argument("--use_demo", action="store_true", help="apply demo mosaic boxes (center box)")
 
-    parser.add_argument("--det_conf", type=float, default=0.30, help="YOLO face confidence threshold")
+    # detector / tracker tuning
+    parser.add_argument("--det_conf", type=float, default=0.60, help="YOLO face confidence threshold")
     parser.add_argument("--track_iou", type=float, default=0.30, help="IoU match threshold (tracker)")
     parser.add_argument("--track_max_miss", type=int, default=10, help="max missed frames to keep a track")
 
+    # debug
+    parser.add_argument("--use_demo", action="store_true", help="apply demo mosaic boxes (center box)")
     parser.add_argument("--draw_boxes", action="store_true", help="draw tracker boxes + ids (debug)")
     parser.add_argument("--print_every", type=int, default=0, help="print stats every N frames (0=off)")
 
