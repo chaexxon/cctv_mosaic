@@ -7,3 +7,6 @@ data/output/
 data/logs/
 
 models/
+
+*.sqlite3
+*.db
