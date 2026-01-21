@@ -9,6 +9,7 @@ import cv2
 
 from utils.video import open_capture, get_video_info, iter_frames, make_writer, safe_release
 from services.mosaic import apply_mosaic, MosaicMode, BBox
+from services.face_detector import FaceDetector
 
 
 def _demo_targets(video_info, box_w_ratio=0.25, box_h_ratio=0.45) -> Dict[int, List[BBox]]:
@@ -42,28 +43,18 @@ def _demo_targets(video_info, box_w_ratio=0.25, box_h_ratio=0.45) -> Dict[int, L
 def process_video(
     input_video_path: str,
     output_video_path: str,
-    mosaic_targets: Dict[int, List[BBox]],
     *,
     mode: MosaicMode = "blur",
     pixelate_scale: float = 0.12,
     codec: str = "mp4v",
+    use_demo_boxes: bool = False,
 ) -> str:
     """
-    Minimal B-side processor:
+    B-side processor (demo + detector hook):
     - Read input video
-    - For frames listed in mosaic_targets, apply mosaic to given bboxes
+    - (optional) apply demo mosaic boxes
+    - apply detector-produced boxes (currently empty)
     - Write output video
-
-    Args:
-        input_video_path: input mp4 path
-        output_video_path: output mp4 path
-        mosaic_targets: {frame_idx: [(x1,y1,x2,y2), ...], ...}
-        mode: "blur" or "pixelate"
-        pixelate_scale: used only for pixelate mode
-        codec: output fourcc (default mp4v)
-
-    Returns:
-        output_video_path
     """
     cap = None
     writer = None
@@ -82,10 +73,26 @@ def process_video(
             is_color=True,
         )
 
+        # detector (현재는 빈 리스트 반환이지만, 구조를 미리 고정)
+        detector = FaceDetector(conf_thres=0.5)
+
+        # demo targets (옵션)
+        demo_targets = _demo_targets(info) if use_demo_boxes else {}
+
         for idx, frame in iter_frames(cap):
-            boxes = mosaic_targets.get(idx, [])
+            boxes: List[BBox] = []
+
+            # 1) demo boxes
+            if use_demo_boxes:
+                boxes.extend(demo_targets.get(idx, []))
+
+            # 2) detector boxes
+            dets = detector.detect(frame)
+            boxes.extend([d["bbox"] for d in dets if d.get("cls") == "face" and d.get("conf", 0) >= 0.5])
+
             if boxes:
                 frame = apply_mosaic(frame, boxes, mode=mode, pixelate_scale=pixelate_scale)
+
             writer.write(frame)
 
         return str(out_path)
@@ -95,29 +102,22 @@ def process_video(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="B: process video with dummy mosaic targets")
+    parser = argparse.ArgumentParser(description="B: process video (demo + detector hook)")
     parser.add_argument("--in", dest="inp", required=True, help="input video path")
     parser.add_argument("--out", dest="out", required=True, help="output video path")
     parser.add_argument("--mode", choices=["blur", "pixelate"], default="blur", help="mosaic mode")
     parser.add_argument("--pixel_scale", type=float, default=0.12, help="pixelate scale (0.02~0.5)")
     parser.add_argument("--codec", type=str, default="mp4v", help="fourcc codec (mp4v, avc1, XVID...)")
-    parser.add_argument("--demo", action="store_true", help="use demo targets (default)")
+    parser.add_argument("--use_demo", action="store_true", help="apply demo mosaic boxes (center box)")
     args = parser.parse_args()
-
-    cap = open_capture(args.inp)
-    info = get_video_info(cap)
-    cap.release()
-
-    # For now: demo targets only
-    mosaic_targets = _demo_targets(info)
 
     out_path = process_video(
         input_video_path=args.inp,
         output_video_path=args.out,
-        mosaic_targets=mosaic_targets,
         mode=args.mode,
         pixelate_scale=args.pixel_scale,
         codec=args.codec,
+        use_demo_boxes=args.use_demo,
     )
     print(f"Saved output: {out_path}")
 
