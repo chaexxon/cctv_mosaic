@@ -106,7 +106,7 @@ def main() -> int:
 
     # ---- DB 저장 ----
     try:
-        face_id = db.insert_face(name=name, embedding=emb)  # 너희 db/sqlite.py 시그니처에 맞춰둠
+        face_id = db.insert_face(name=name, embedding_blob=emb.tobytes())  # 너희 db/sqlite.py 시그니처에 맞춰둠
     except TypeError:
         # 혹시 시그니처가 insert_face(name, embedding_blob) 등으로 다르면 여기서 바로 잡을 수 있게 메시지
         print("[ERR] db.insert_face signature mismatch. Check db/sqlite.py insert_face(...) parameters.", file=sys.stderr)
