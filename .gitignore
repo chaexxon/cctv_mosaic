@@ -10,3 +10,4 @@ models/
 
 *.sqlite3
 *.db
+scripts/test_*.py

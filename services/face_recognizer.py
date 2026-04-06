@@ -20,7 +20,7 @@ from typing import Optional, Tuple, List
 import numpy as np
 
 from core.config import ARCFACE_MODEL_DIR, FACE_EMBED_DIM
-from utils.normalize import l2_norm
+from utils.similarity import l2_normalize as l2_norm
 
 # -------------------------
 # Exceptions
