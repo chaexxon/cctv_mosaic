@@ -1,22 +1,25 @@
 # scripts/init_db.py
-from __future__ import annotations
 
-import argparse
+import sqlite3
 from pathlib import Path
 
-from db.sqlite import init_db, DEFAULT_DB_PATH, DEFAULT_MODELS_SQL
+DB_PATH = Path("db/cctv_mosaic.sqlite3")
+MODELS_SQL = Path("db/models.sql")
 
 
 def main():
-    p = argparse.ArgumentParser(description="Init SQLite DB schema from db/models.sql")
-    p.add_argument("--db", type=str, default=str(DEFAULT_DB_PATH))
-    p.add_argument("--models", type=str, default=str(DEFAULT_MODELS_SQL))
-    args = p.parse_args()
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-    init_db(db_path=Path(args.db), models_sql_path=Path(args.models))
+    sql = MODELS_SQL.read_text(encoding="utf-8")
+
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.executescript(sql)
+        conn.commit()
+    finally:
+        conn.close()
+
     print("[init_db] OK")
-    print("  db     :", args.db)
-    print("  models :", args.models)
 
 
 if __name__ == "__main__":

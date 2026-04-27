@@ -20,7 +20,8 @@ from typing import Optional, Tuple, List
 import numpy as np
 
 from core.config import ARCFACE_MODEL_DIR, FACE_EMBED_DIM
-from utils.similarity import l2_normalize as l2_norm
+from utils.similarity import l2_normalize as _l2_normalize
+
 
 # -------------------------
 # Exceptions
@@ -95,6 +96,23 @@ def _largest_face_idx(bboxes: List[BBox]) -> int:
     return int(np.argmax(np.asarray(areas))) if areas else -1
 
 
+def _safe_l2_norm(x: np.ndarray) -> np.ndarray:
+    """
+    utils.similarity.l2_normalize()는 norm이 너무 작으면 예외를 던진다.
+    recognizer 레벨에서는 영벡터/비정상 벡터를 '안전한 실패'로 처리하기 위해
+    여기서 한 번 더 방어한다.
+    """
+    x = np.asarray(x, dtype=np.float32).reshape(-1)
+    if not np.isfinite(x).all():
+        raise FaceRecognizerError("Embedding contains NaN/Inf.")
+    n = float(np.linalg.norm(x))
+    if n < 1e-12:
+        # 여기서 예외로 처리할지, 0벡터로 반환할지 선택 가능
+        # 등록/매칭 로직에선 0벡터는 결국 unknown 처리되므로 안전하게 0벡터 반환
+        return np.zeros((x.size,), dtype=np.float32)
+    return _l2_normalize(x)
+
+
 # -------------------------
 # Main
 # -------------------------
@@ -115,12 +133,16 @@ class FaceRecognizer:
         ctx_id: int = -1,  # CPU: -1, GPU: 0
         iou_threshold: float = 0.2,
         enforce_embed_dim: int = FACE_EMBED_DIM,
+        debug_print_loaded_path: bool = False,
     ) -> None:
         self.model_root = model_root or str(ARCFACE_MODEL_DIR)
         self.det_size = det_size
         self.ctx_id = int(ctx_id)
         self.iou_threshold = float(iou_threshold)
         self.enforce_embed_dim = int(enforce_embed_dim)
+
+        if debug_print_loaded_path:
+            print("[DEBUG] FaceRecognizer loaded from:", __file__)
 
         if not (0.0 <= self.iou_threshold <= 1.0):
             raise ValueError("iou_threshold must be in [0, 1]")
@@ -159,7 +181,7 @@ class FaceRecognizer:
 
         cand_bboxes: List[BBox] = []
         cand_scores: List[float] = []
-        cand_embs: List[np.ndarray] = []
+        cand_embs: List[Optional[np.ndarray]] = []
 
         for f in faces:
             fb = f.bbox
@@ -169,23 +191,16 @@ class FaceRecognizer:
 
             emb = getattr(f, "embedding", None)
             if emb is None:
-                # embedding이 없는 face는 스킵
-                cand_embs.append(None)  # type: ignore
+                cand_embs.append(None)
                 continue
             cand_embs.append(np.asarray(emb, dtype=np.float32))
 
-        # embedding이 None인 항목 제거(인덱스 유지 위해 필터링 방식 변경)
-        valid = [(i, e) for i, e in enumerate(cand_embs) if e is not None]
-        if not valid:
+        valid_idxs = [i for i, e in enumerate(cand_embs) if e is not None]
+        if not valid_idxs:
             raise FaceNotFoundError("얼굴은 검출됐지만 embedding 추출에 실패했습니다.")
-
-        # 선택 로직은 bbox 리스트 기준으로 하되, emb 없는 인덱스 피하게 보정
-        # (대부분 정상 상황에서는 모든 face가 embedding을 갖기 때문에 크게 문제 없음)
-        valid_idxs = [i for i, _ in valid]
 
         def pick_idx_by_rule() -> int:
             if bbox is None:
-                # largest among valid
                 vb = [cand_bboxes[i] for i in valid_idxs]
                 li = _largest_face_idx(vb)
                 if li < 0:
@@ -205,21 +220,14 @@ class FaceRecognizer:
                 raise FaceNotFoundError("유효한 얼굴 bbox를 찾지 못했습니다.")
             raise FaceNotFoundError("bbox와 매칭되는 얼굴을 찾지 못했습니다.")
 
-        emb = cand_embs[idx]
-        emb = np.asarray(emb, dtype=np.float32)
-
-        if emb.ndim != 1:
-            emb = emb.reshape(-1)
+        emb = np.asarray(cand_embs[idx], dtype=np.float32).reshape(-1)  # type: ignore
 
         if self.enforce_embed_dim > 0 and emb.shape[0] != self.enforce_embed_dim:
             raise EmbeddingDimError(
                 f"Embedding dim mismatch: got {emb.shape[0]}, expected {self.enforce_embed_dim}"
             )
 
-        emb = l2_norm(emb)
-
-        if not np.all(np.isfinite(emb)):
-            raise FaceRecognizerError("Embedding에 NaN/Inf가 포함되어 있습니다.")
+        emb = _safe_l2_norm(emb)
 
         return FaceEmbedding(
             embedding=emb,
@@ -228,19 +236,16 @@ class FaceRecognizer:
         )
 
     # ==========================================================
-    # ✅ 호환용 API (너 테스트 코드/기존 코드가 기대하던 이름들)
+    # ✅ 호환용 API (테스트 코드/기존 코드가 기대하던 이름들)
     # ==========================================================
     def extract_from_crop(self, face_bgr: np.ndarray) -> np.ndarray:
         """
         얼굴 crop(BGR)만 넣으면 embedding (FACE_EMBED_DIM,) 반환.
-        - 내부적으로 extract_from_frame을 재사용 (가장 안전)
+        - 내부적으로 extract_from_frame을 재사용
         """
         fe = self.extract_from_frame(face_bgr, bbox=None)
         return fe.embedding
 
     def extract(self, face_bgr: np.ndarray) -> np.ndarray:
-        """
-        (호환용 alias)
-        - 기존 테스트/코드에서 recognizer.extract(...)를 쓰는 경우 대응
-        """
+        """(호환용 alias)"""
         return self.extract_from_crop(face_bgr)

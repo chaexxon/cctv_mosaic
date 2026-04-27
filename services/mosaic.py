@@ -32,8 +32,8 @@ def _apply_blur_roi(roi: np.ndarray) -> np.ndarray:
     """
     rh, rw = roi.shape[:2]
     # Adaptive kernel: odd numbers, minimum 7
-    kx = max(7, (rw // 12) | 1)
-    ky = max(7, (rh // 12) | 1)
+    kx = max(21, (rw // 6) | 1)
+    ky = max(21, (rh // 6) | 1)
     return cv2.GaussianBlur(roi, (kx, ky), sigmaX=0, sigmaY=0)
 
 

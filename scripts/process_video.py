@@ -153,11 +153,21 @@ def _ocr_unpack(o: Any) -> Tuple[str, float]:
     Support common OCR return formats:
       - {"text": "...", "conf": 0.9}
       - ("...", 0.9)
+      - OCRResult(text="...", conf=0.9)
       - "..."
     """
+    if o is None:
+        return "", 0.0
+
     if isinstance(o, dict):
         raw = str(o.get("text", "")).strip()
         conf = float(o.get("conf", 0.0) or 0.0)
+        return raw, conf
+
+    # OCRResult(text=..., conf=...) 같은 객체 처리
+    if hasattr(o, "text"):
+        raw = str(getattr(o, "text", "")).strip()
+        conf = float(getattr(o, "conf", 0.0) or 0.0)
         return raw, conf
 
     if isinstance(o, (tuple, list)):
@@ -165,7 +175,7 @@ def _ocr_unpack(o: Any) -> Tuple[str, float]:
         conf = float(o[1]) if len(o) >= 2 else 0.0
         return raw, conf
 
-    raw = str(o).strip() if o is not None else ""
+    raw = str(o).strip()
     return raw, 0.0
 
 
@@ -229,7 +239,38 @@ def _get_track_val(t: Any, key: str, default=None):
         return t.get(key, default)
     return getattr(t, key, default)
 
+def _plate_prefix(p: str) -> str:
+    p = str(p).replace(" ", "").strip()
+    return p[:3] if len(p) >= 3 else p
 
+
+def _is_plate_registered_loose(best_norm: str, regs_exact: set[str]) -> bool:
+    q = str(best_norm).replace(" ", "").strip()
+    if not q:
+        return False
+
+    if q in regs_exact:
+        return True
+
+    q_digits = "".join(ch for ch in q if ch.isdigit())
+
+    for r in regs_exact:
+        r_clean = str(r).replace(" ", "").strip()
+
+        if len(q) >= 3 and q[:3] == r_clean[:3]:
+            return True
+
+        r_digits = "".join(ch for ch in r_clean if ch.isdigit())
+
+        if len(q_digits) >= 1 and len(r_digits) >= 1:
+            if q_digits[0] == r_digits[0]:
+                return True
+
+        if len(q_digits) >= 4 and len(r_digits) >= 4:
+            if q_digits[-4] == r_digits[-4]:
+                return True
+
+    return False
 # ============================================================
 # Core
 # ============================================================
@@ -502,13 +543,23 @@ def process_video(
                 for lane in range(max(1, plate_lanes)):
                     best_norm, best_score, stable = plate_votes[lane].update(lane_votes_in.get(lane, []))
                     lane_best[lane] = (best_norm, best_score, stable)
+                    
+                    
 
                 # 3) 모자이크 / 예외 판정
                 for i, (lane, pb, raw, conf, norm) in enumerate(per_plate_info):
                     best_norm, best_score, stable = lane_best.get(lane, ("", 0.0, False))
 
                     best_is_plate = bool(best_norm and PLATE_RE.match(best_norm))
-                    is_reg_now = bool(stable and best_is_plate and (best_norm in regs_exact))
+
+# 안정화된 best_norm이 등록판과 맞는 경우
+                    best_reg_now = bool(stable and _is_plate_registered_loose(best_norm, regs_exact))
+
+# 현재 프레임 OCR 결과 norm이 앞 3글자라도 등록판과 맞는 경우
+                    ocr_reg_now = bool(_is_plate_registered_loose(norm, regs_exact))
+                    # 3) raw 문자열까지도 검사
+                    raw_reg_now = bool(_is_plate_registered_loose(raw, regs_exact))
+                    is_reg_now = best_reg_now or ocr_reg_now
 
                     if is_reg_now:
                         plate_reg_last_ok_frame[lane] = idx

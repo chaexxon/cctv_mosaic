@@ -55,11 +55,53 @@ def _normalize_embedding(emb: np.ndarray) -> np.ndarray:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Register face embedding into SQLite DB")
-    parser.add_argument("--name", required=True, help="person name/label to register")
-    parser.add_argument("--img", required=True, help="path to face image (jpg/png)")
+    parser.add_argument("--name", required=False, help="person name/label to register")
+    parser.add_argument("--img", required=False, help="path to face image")
+    parser.add_argument("--dir", default=None, help="directory of face images")
     parser.add_argument("--db", default=None, help="sqlite db path (default: from core.config.DB_PATH or db/cctv_mosaic.sqlite3)")
     parser.add_argument("--no_norm", action="store_true", help="do not L2-normalize embedding (default: normalize)")
     args = parser.parse_args()
+
+    # 🔥 폴더 전체 등록 모드
+    if args.dir:
+        from pathlib import Path
+        import cv2
+        import numpy as np
+
+        faces_dir = Path(args.dir)
+        if not faces_dir.exists():
+            print(f"[ERR] dir not found: {faces_dir}")
+            return 2
+
+        recognizer = FaceRecognizer()
+        db = SQLiteDB(_resolve_db_path(args.db))
+
+        img_files = list(faces_dir.glob("*.*"))
+
+        print(f"[INFO] found {len(img_files)} images")
+
+        for img_path in img_files:
+            try:
+                img = cv2.imread(str(img_path))
+                if img is None:
+                    print(f"[SKIP] cannot read: {img_path}")
+                    continue
+
+                out = recognizer.extract_from_frame(img, bbox=None)
+                emb = out.embedding if hasattr(out, "embedding") else out
+
+                emb = emb.astype(np.float32).reshape(-1)
+                emb = emb / np.linalg.norm(emb)
+
+                name = img_path.stem
+                face_id = db.insert_face(name=name, embedding_blob=emb.tobytes())
+
+                print(f"[OK] {name} 등록됨 (id={face_id})")
+
+            except Exception as e:
+                print(f"[FAIL] {img_path}: {e}")
+
+        return 0
 
     name = str(args.name).strip()
     if not name:
