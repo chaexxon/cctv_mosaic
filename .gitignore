@@ -28,3 +28,15 @@ Thumbs.db
 
 # 테스트 이미지
 mosaic_*_test.png
+
+# debug
+data/debug/
+data/debug_plate/
+data/logs/
+
+# web runtime files
+static/uploads/
+static/outputs/
+
+# local face test
+data/faces/minseo.png

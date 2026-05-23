@@ -1,0 +1,22 @@
+{
+  "plates": [
+    {
+      "owner": "hongmin",
+      "plate_raw": "12가 3456",
+      "plate_norm": "12가3456",
+      "created_at": "2026-01-28T22:46:21"
+    },
+    {
+      "owner": "hongmin",
+      "plate_raw": "25무 9889",
+      "plate_norm": "25무9889",
+      "created_at": "2026-01-28T23:23:08"
+    },
+    {
+      "owner": "minseo",
+      "plate_raw": "172허7410",
+      "plate_norm": "172허7410",
+      "created_at": "2026-02-02T00:04:33"
+    }
+  ]
+}
