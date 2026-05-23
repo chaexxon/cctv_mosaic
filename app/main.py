@@ -170,6 +170,17 @@ async def process_video_web(
         end_time=end_time,
     )
 
+    # 이전 등록 데이터 초기화
+    # =========================
+
+    try:
+        db.execute("DELETE FROM faces")
+        db.execute("DELETE FROM plates")
+        print("[db] cleared faces and plates")
+
+    except Exception as e:
+        print(f"[db] clear failed: {e}")
+
     # 3. 얼굴 등록
     # =========================
 
