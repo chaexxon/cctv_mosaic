@@ -245,32 +245,47 @@ def _plate_prefix(p: str) -> str:
 
 
 def _is_plate_registered_loose(best_norm: str, regs_exact: set[str]) -> bool:
+
     q = str(best_norm).replace(" ", "").strip()
+
     if not q:
         return False
 
-    if q in regs_exact:
-        return True
-
+    # =========================
+    # 숫자만 추출
+    # =========================
     q_digits = "".join(ch for ch in q if ch.isdigit())
 
     for r in regs_exact:
+
         r_clean = str(r).replace(" ", "").strip()
 
-        if len(q) >= 3 and q[:3] == r_clean[:3]:
+        # -------------------------
+        # 1. 완전 일치
+        # -------------------------
+        if q == r_clean:
             return True
 
         r_digits = "".join(ch for ch in r_clean if ch.isdigit())
 
-        if len(q_digits) >= 1 and len(r_digits) >= 1:
-            if q_digits[0] == r_digits[0]:
-                return True
+        # -------------------------
+        # 2. 앞 숫자 전체 + 뒤 첫 숫자
+        # 예:
+        # 22라6076 -> 226
+        # -------------------------
+        if len(q_digits) >= 5 and len(r_digits) >= 5:
 
-        if len(q_digits) >= 4 and len(r_digits) >= 4:
-            if q_digits[-4] == r_digits[-4]:
+            q_front = q_digits[:-4]
+            r_front = r_digits[:-4]
+
+            q_back_first = q_digits[-4]
+            r_back_first = r_digits[-4]
+
+            if q_front == r_front and q_back_first == r_back_first:
                 return True
 
     return False
+
 # ============================================================
 # Core
 # ============================================================
@@ -280,12 +295,10 @@ def process_video(
     *,
     mode: MosaicMode = "blur",
     pixelate_scale: float = 0.12,
-    # face
     det_conf_face: float = 0.30,
     predict_conf_face: float = 0.15,
     disable_face_filters: bool = False,
     hold_last: int = 30,
-    # debug
     draw_boxes: bool = False,
     draw_hold: bool = False,
     print_every: int = 0,
@@ -294,7 +307,6 @@ def process_video(
     debug_dump_every: int = 30,
     debug_dump_dir: str = "data/debug",
     debug_dump_frame_dir: str = "data/debug_plate",
-    # plate
     enable_plate: bool = False,
     plate_model_path: str = "models/yolo_plate/yolov8n-plate.pt",
     det_conf_plate: float = 0.35,
@@ -304,9 +316,7 @@ def process_video(
     plate_stable_min_hits: int = 6,
     plate_lanes: int = 3,
     plate_pad_ratio: float = 0.18,
-    # DB
     db_path: str = "db/cctv_mosaic.sqlite3",
-    # 등록판 TTL (frames)
     plate_reg_hold_ttl: int = 60,
     args=None,
 ) -> str:
@@ -317,11 +327,16 @@ def process_video(
     tmp_path = out_path.with_suffix(".tmp.mp4")
 
     if out_path.exists() and not overwrite:
-        print(f"[process_video] output exists, skip (use --overwrite to force): {out_path}")
+        print(f"[process_video] output exists, skip: {out_path}")
         return str(out_path)
 
-    # lane별 plate vote
-    plate_votes: Dict[int, PlateVote] = defaultdict(
+    db = SQLiteDB(db_path)
+
+    frames_store = []
+    final_registered_tracks = set()
+    final_registered_lanes = set()
+
+    plate_votes = defaultdict(
         lambda: PlateVote(
             window=plate_vote_window,
             stable_ratio=plate_stable_ratio,
@@ -329,25 +344,10 @@ def process_video(
         )
     )
 
-    # lane별 최근 등록판 확정 프레임
-    plate_reg_last_ok_frame: Dict[int, int] = defaultdict(lambda: -10**9)
-
-    db = SQLiteDB(db_path)
-    regs_exact: set[str] = set()
-
     try:
         cap = open_capture(input_video_path)
         info = get_video_info(cap)
 
-        writer = make_writer(
-            output_path=tmp_path,
-            fps=info.fps,
-            frame_size=(info.width, info.height),
-            codec="mp4v",
-            is_color=True,
-        )
-
-        # face detect / track
         detector = FaceDetector(
             conf_thres=det_conf_face,
             predict_conf=predict_conf_face,
@@ -355,58 +355,56 @@ def process_video(
         )
         tracker = _build_tracker(args)
 
-        # face recognition (C)
         recognizer = FaceRecognizer()
         temporal = TemporalEmbedder()
         matcher = IdentityMatcher(db=db)
 
-        # plate init
-        plate_detector: Optional[SPlateDetector] = None
-        ocr_engine: Optional[SOcrEngine] = None
+        plate_detector = None
+        ocr_engine = None
         plate_ok = False
+        regs_exact = set()
 
         if enable_plate:
             try:
                 plate_detector = SPlateDetector(model_path=plate_model_path, conf_thres=det_conf_plate)
                 ocr_engine = SOcrEngine(lang="ko")
-
                 regs_exact = db.get_registered_plate_set()
-
                 plate_ok = True
+
                 print(f"[plate] detector=ON model={plate_model_path} conf={det_conf_plate}")
                 print(f"[plate] ocr_backend={ocr_engine.backend} db={db_path} regs={len(regs_exact)}")
-                if getattr(ocr_engine, "backend", "none") == "none":
-                    print("[WARN] OCR backend is none -> plate matching won't work (all plates will be mosaiced)")
             except Exception as e:
                 print(f"[WARN] plate init failed -> disable plate: {e}")
-                plate_detector = None
-                ocr_engine = None
-                regs_exact = set()
-                plate_ok = False
                 enable_plate = False
 
-        # 얼굴 hold는 "미등록 얼굴 blur 박스" 기준으로 유지
-        last_face_blur_boxes: List[BBox] = []
-        face_hold_left = 0
+        print("[process_video] pass1 analyze start")
 
         for idx, frame in iter_frames(cap):
-            # 번호판은 모자이크 전 원본에서 detect/crop
             frame_raw = frame.copy()
 
-            # -------------------------
-            # face
-            # -------------------------
+            frame_record = {
+                "idx": idx,
+                "frame": frame_raw.copy(),
+                "faces": [],
+                "plates": [],
+                "faces_det": 0,
+                "faces_track": 0,
+                "plates_blur": 0,
+                "plate_boxes": 0,
+                "ocr_valid": 0,
+            }
+
+            # =========================
+            # PASS1 FACE ANALYZE
+            # =========================
             dets = detector.detect(frame)
             face_dets = [d for d in dets if d.get("cls") == "face" and "bbox" in d]
+            frame_record["faces_det"] = len(face_dets)
 
             try:
                 tracks = tracker.update(frame, idx, face_dets)
             except TypeError:
                 tracks = tracker.update(face_dets)
-
-            track_boxes: List[BBox] = []
-            face_blur_boxes: List[BBox] = []
-            used_hold = False
 
             if tracks:
                 for t in tracks:
@@ -414,102 +412,72 @@ def process_video(
                     cls_name = _get_track_val(t, "cls", "face")
                     track_id = _get_track_val(t, "track_id", None)
 
-                    if bbox is None or cls_name != "face":
-                        continue
-                    if track_id is None:
+                    if bbox is None or cls_name != "face" or track_id is None:
                         continue
 
                     x1, y1, x2, y2 = [int(v) for v in bbox]
                     cur_box = (x1, y1, x2, y2)
-                    track_boxes.append(cur_box)
+                    tid = int(track_id)
+
+                    is_registered = False
+                    score = 0.0
+                    label = "unknown"
 
                     try:
-                        # C-1) bbox 기준 embedding 추출
-                        fe = recognizer.extract_from_frame(frame, cur_box)
+                        fe = recognizer.extract_from_frame(frame_raw, cur_box)
 
-                        # C-2) temporal embedding
                         rep_emb = temporal.update(
-                            track_id=int(track_id),
+                            track_id=tid,
                             embedding=fe.embedding,
                             frame_idx=int(idx),
                         )
 
-                        # C-3) DB 매칭
                         match = matcher.match_face(rep_emb)
+
+                        is_registered = bool(match.is_registered)
+                        score = float(match.score)
+                        label = str(match.label)
+
+                        if is_registered:
+                            final_registered_tracks.add(tid)
 
                         if print_every and idx % print_every == 0:
                             print(
-                                f"[face-match] frame={idx} track={track_id} "
-                                f"registered={match.is_registered} "
-                                f"label={match.label} score={match.score:.4f}"
+                                f"[face-match/pass1] frame={idx} track={tid} "
+                                f"registered={is_registered} label={label} score={score:.4f}"
                             )
 
-                        # 정책: 등록된 얼굴은 유지, 미등록만 blur
-                        if not match.is_registered:
-                            face_blur_boxes.append(cur_box)
-
                     except Exception as e:
-                        # 인식 실패 시 안전하게 blur
                         if print_every and idx % print_every == 0:
-                            print(f"[WARN] face recognition failed frame={idx} track={track_id}: {e}")
-                        face_blur_boxes.append(cur_box)
+                            print(f"[WARN] face recognition failed frame={idx} track={tid}: {e}")
 
-                if face_blur_boxes:
-                    last_face_blur_boxes = face_blur_boxes[:]
-                    face_hold_left = hold_last
-                else:
-                    last_face_blur_boxes = []
-                    face_hold_left = 0
+                    frame_record["faces"].append(
+                        {
+                            "track_id": tid,
+                            "bbox": cur_box,
+                            "registered": is_registered,
+                            "score": score,
+                            "label": label,
+                        }
+                    )
 
-            elif face_hold_left > 0 and last_face_blur_boxes:
-                face_blur_boxes = last_face_blur_boxes[:]
-                face_hold_left -= 1
-                used_hold = True
+            frame_record["faces_track"] = len(frame_record["faces"])
 
-            if face_blur_boxes:
-                frame = apply_mosaic(frame, face_blur_boxes, mode=mode, pixelate_scale=pixelate_scale)
-
-            if draw_boxes and track_boxes:
-                for b in track_boxes:
-                    _draw_box(frame, b, (255, 0, 255), "face")
-
-            if draw_hold and used_hold:
-                for (x1, y1, x2, y2) in last_face_blur_boxes:
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
-
-            # -------------------------
-            # plate
-            # -------------------------
-            plates_mosaic = 0
-            plate_boxes_n = 0
-            ocr_valid_n = 0
-
+            # =========================
+            # PASS1 PLATE ANALYZE
+            # =========================
             if enable_plate and plate_ok and plate_detector is not None and ocr_engine is not None:
                 H, W = frame_raw.shape[:2]
 
-                if debug_dump_plate_crops and (idx % max(1, debug_dump_every) == 0):
-                    dbg = Path(debug_dump_frame_dir)
-                    dbg.mkdir(parents=True, exist_ok=True)
-                    cv2.imwrite(str(dbg / f"frame_{idx:06d}.jpg"), frame_raw)
-
                 plate_dets = plate_detector.detect(frame_raw)
                 plate_boxes = _iter_plate_bboxes(plate_dets)
-
-                # 중복 제거
                 plate_boxes = _nms_boxes(plate_boxes, iou_th=0.55)
-
-                plate_boxes_n = len(plate_boxes)
                 plate_boxes_sorted = sorted(plate_boxes, key=lambda b: (b[0] + b[2]) / 2.0)
 
-                boxes_to_mosaic: List[BBox] = []
-                debug_plate = bool(print_every and idx % print_every == 0)
+                frame_record["plate_boxes"] = len(plate_boxes_sorted)
 
-                # lane별 vote input
-                lane_votes_in: Dict[int, List[Tuple[str, float]]] = defaultdict(list)
-
-                # 1) OCR 먼저 전부 수행
-                per_plate_info: List[Tuple[int, BBox, str, float, str]] = []
-                # (lane, pb, raw, conf, norm)
+                lane_votes_in = defaultdict(list)
+                per_plate_info = []
 
                 for i, pb in enumerate(plate_boxes_sorted):
                     pb2 = _pad_bbox(pb, W, H, pad_ratio=plate_pad_ratio)
@@ -519,13 +487,11 @@ def process_video(
                     x2 = max(0, min(x2, W))
                     y1 = max(0, min(y1, H - 1))
                     y2 = max(0, min(y2, H))
+
                     if x2 <= x1 or y2 <= y1:
                         continue
 
                     crop = frame_raw[y1:y2, x1:x2]
-
-                    if debug_dump_plate_crops and (idx % max(1, debug_dump_every) == 0):
-                        _safe_imwrite(Path(debug_dump_dir) / f"plate_crop_f{idx:06d}_i{i}.jpg", crop)
 
                     o = ocr_engine.read_plate(crop)
                     raw, conf = _ocr_unpack(o)
@@ -536,73 +502,131 @@ def process_video(
 
                     if conf >= ocr_conf_thres and PLATE_RE.match(norm):
                         lane_votes_in[lane].append((norm, conf))
-                        ocr_valid_n += 1
+                        frame_record["ocr_valid"] += 1
 
-                # 2) lane별 vote 업데이트
-                lane_best: Dict[int, Tuple[str, float, bool]] = {}
+                lane_best = {}
                 for lane in range(max(1, plate_lanes)):
                     best_norm, best_score, stable = plate_votes[lane].update(lane_votes_in.get(lane, []))
                     lane_best[lane] = (best_norm, best_score, stable)
-                    
-                    
 
-                # 3) 모자이크 / 예외 판정
                 for i, (lane, pb, raw, conf, norm) in enumerate(per_plate_info):
                     best_norm, best_score, stable = lane_best.get(lane, ("", 0.0, False))
 
-                    best_is_plate = bool(best_norm and PLATE_RE.match(best_norm))
-
-# 안정화된 best_norm이 등록판과 맞는 경우
                     best_reg_now = bool(stable and _is_plate_registered_loose(best_norm, regs_exact))
-
-# 현재 프레임 OCR 결과 norm이 앞 3글자라도 등록판과 맞는 경우
                     ocr_reg_now = bool(_is_plate_registered_loose(norm, regs_exact))
-                    # 3) raw 문자열까지도 검사
                     raw_reg_now = bool(_is_plate_registered_loose(raw, regs_exact))
-                    is_reg_now = best_reg_now or ocr_reg_now
 
-                    if is_reg_now:
-                        plate_reg_last_ok_frame[lane] = idx
+                    is_registered = best_reg_now or ocr_reg_now or raw_reg_now
 
-                    is_reg = is_reg_now or ((idx - plate_reg_last_ok_frame[lane]) <= plate_reg_hold_ttl)
+                    if is_registered:
+                        final_registered_lanes.add(int(lane))
 
-                    if debug_plate:
-                        ttl_left = plate_reg_hold_ttl - (idx - plate_reg_last_ok_frame[lane])
+                    frame_record["plates"].append(
+                        {
+                            "lane": int(lane),
+                            "bbox": pb,
+                            "raw": raw,
+                            "norm": norm,
+                            "conf": conf,
+                            "best": best_norm,
+                            "stable": stable,
+                            "registered": is_registered,
+                        }
+                    )
+
+                    if print_every and idx % print_every == 0:
                         print(
-                            f"[plate@{idx}] i={i} lane={lane} raw='{raw}' norm='{norm}' conf={conf:.2f} "
-                            f"best='{best_norm}' score={best_score:.2f} stable={stable} "
-                            f"reg_exact={is_reg} ttl={ttl_left}"
+                            f"[plate/pass1@{idx}] i={i} lane={lane} raw='{raw}' norm='{norm}' "
+                            f"conf={conf:.2f} best='{best_norm}' stable={stable} "
+                            f"registered={is_registered}"
                         )
 
-                    if not is_reg:
-                        boxes_to_mosaic.append(pb)
+            frames_store.append(frame_record)
 
-                    if draw_boxes:
-                        shown = best_norm if best_norm else norm
-                        lbl = f"plate:{shown}" if is_reg else f"plate*:{shown}"
-                        _draw_box(frame, pb, (0, 0, 255), lbl)
+            if print_every and idx % print_every == 0:
+                print(
+                    f"[pass1 frame {idx}] faces_det={frame_record['faces_det']} "
+                    f"faces_track={frame_record['faces_track']} "
+                    f"plate_boxes={frame_record['plate_boxes']} "
+                    f"ocr_valid={frame_record['ocr_valid']}"
+                )
 
-                if boxes_to_mosaic:
-                    frame = apply_mosaic(frame, boxes_to_mosaic, mode=mode, pixelate_scale=pixelate_scale)
-                    plates_mosaic = len(boxes_to_mosaic)
+        safe_release(cap)
+        cap = None
+
+        print(f"[process_video] pass1 done")
+        print(f"[process_video] registered face tracks: {sorted(final_registered_tracks)}")
+        print(f"[process_video] registered plate lanes: {sorted(final_registered_lanes)}")
+
+        # =========================
+        # PASS2 WRITE VIDEO
+        # =========================
+        writer = make_writer(
+            output_path=tmp_path,
+            fps=info.fps,
+            frame_size=(info.width, info.height),
+            codec="mp4v",
+            is_color=True,
+        )
+
+        print("[process_video] pass2 render start")
+
+        last_face_blur_boxes = []
+        face_hold_left = 0
+
+        for rec in frames_store:
+            idx = rec["idx"]
+            frame = rec["frame"].copy()
+
+            face_blur_boxes = []
+            plate_blur_boxes = []
+
+            for f in rec["faces"]:
+                tid = int(f["track_id"])
+                bbox = f["bbox"]
+
+                # 2-pass 핵심:
+                # 영상 뒤쪽에서라도 registered로 판정된 track은
+                # 앞 프레임에서도 모자이크 해제
+                if tid not in final_registered_tracks:
+                    face_blur_boxes.append(bbox)
+
+            if face_blur_boxes:
+                last_face_blur_boxes = face_blur_boxes[:]
+                face_hold_left = hold_last
+            elif face_hold_left > 0 and last_face_blur_boxes:
+                face_blur_boxes = last_face_blur_boxes[:]
+                face_hold_left -= 1
+
+            for p in rec["plates"]:
+                lane = int(p["lane"])
+                bbox = p["bbox"]
+
+                # 2-pass 핵심:
+                # 영상 뒤쪽에서라도 등록 번호판 lane으로 판정되면
+                # 앞 프레임도 모자이크 해제
+                if lane not in final_registered_lanes:
+                    plate_blur_boxes.append(bbox)
+
+            if face_blur_boxes:
+                frame = apply_mosaic(frame, face_blur_boxes, mode=mode, pixelate_scale=pixelate_scale)
+
+            if plate_blur_boxes:
+                frame = apply_mosaic(frame, plate_blur_boxes, mode=mode, pixelate_scale=pixelate_scale)
 
             writer.write(frame)
 
             if print_every and idx % print_every == 0:
                 print(
-                    f"[frame {idx}] faces_det={len(face_dets)} "
-                    f"faces_track={len(track_boxes)} "
-                    f"faces_blur={len(face_blur_boxes)} "
-                    f"face_hold={used_hold} "
-                    f"plate_boxes={plate_boxes_n} "
-                    f"ocr_valid={ocr_valid_n} "
-                    f"plates_blur={plates_mosaic}"
+                    f"[pass2 frame {idx}] faces_blur={len(face_blur_boxes)} "
+                    f"plates_blur={len(plate_blur_boxes)}"
                 )
 
-        safe_release(cap)
         safe_release(writer)
+        writer = None
 
         _encode_h264(tmp_path, out_path)
+
         if tmp_path.exists():
             tmp_path.unlink(missing_ok=True)
 
