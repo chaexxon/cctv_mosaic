@@ -48,7 +48,7 @@ DETECT_EVERY_N_FRAMES: int = int(os.getenv("DETECT_EVERY_N_FRAMES", "3"))
 FACE_EMBED_DIM: int = int(os.getenv("FACE_EMBED_DIM", "512"))
 
 # cosine similarity threshold (등록 판정)
-FACE_SIM_THRESHOLD: float = float(os.getenv("FACE_SIM_THRESHOLD", "0.55"))
+FACE_SIM_THRESHOLD: float = float(os.getenv("FACE_SIM_THRESHOLD", "0.50"))
 
 # Temporal embedding (C)
 TEMPORAL_WINDOW: int = int(os.getenv("TEMPORAL_WINDOW", "5"))
