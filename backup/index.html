@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CCTV 모자이크 시스템</title>
+
+    <style>
+
+        body{
+            margin:0;
+            padding:0;
+            background:#f3f4f6;
+            font-family:Arial, Helvetica, sans-serif;
+        }
+
+        .container{
+            width:800px;
+            margin:40px auto;
+            background:white;
+            padding:40px;
+            border-radius:16px;
+            box-shadow:0 4px 20px rgba(0,0,0,0.1);
+        }
+
+        h1{
+            text-align:center;
+            margin-bottom:10px;
+        }
+
+        .subtitle{
+            text-align:center;
+            color:#666;
+            margin-bottom:40px;
+        }
+
+        label{
+            display:block;
+            font-weight:bold;
+            margin-top:20px;
+            margin-bottom:8px;
+        }
+
+        input{
+            width:100%;
+            padding:12px;
+            border:1px solid #ccc;
+            border-radius:8px;
+            box-sizing:border-box;
+        }
+
+        button{
+            width:100%;
+            padding:15px;
+            margin-top:35px;
+            border:none;
+            border-radius:10px;
+            background:#2563eb;
+            color:white;
+            font-size:18px;
+            cursor:pointer;
+        }
+
+        button:hover{
+            background:#1d4ed8;
+        }
+
+        .message{
+            margin-top:30px;
+            padding:15px;
+            border-radius:10px;
+            background:#dcfce7;
+            color:#166534;
+            font-weight:bold;
+        }
+
+        .result{
+            margin-top:40px;
+        }
+
+        video{
+            width:100%;
+            border-radius:12px;
+            background:black;
+        }
+
+        .download{
+            display:block;
+            margin-top:15px;
+            text-align:center;
+            text-decoration:none;
+            font-weight:bold;
+            color:#2563eb;
+        }
+
+    </style>
+</head>
+
+<body>
+
+<div class="container">
+
+    <h1>CCTV 모자이크 시스템</h1>
+
+    <div class="subtitle">
+        영상 업로드 후 얼굴 및 번호판 기반 모자이크 처리를 수행합니다.
+    </div>
+
+    <form action="/process" method="post" enctype="multipart/form-data">
+
+        <!-- 영상 업로드 -->
+        <label>영상 업로드</label>
+
+        <input
+            type="file"
+            name="video"
+            accept="video/*"
+            required
+        >
+
+        <!-- 시작 시간 -->
+        <label>시작 시간</label>
+
+        <input
+            type="text"
+            name="start_time"
+            placeholder="예: 0 또는 00:00:00"
+            required
+        >
+
+        <!-- 종료 시간 -->
+        <label>종료 시간</label>
+
+        <input
+            type="text"
+            name="end_time"
+            placeholder="예: 5 또는 00:00:05"
+            required
+        >
+
+        <!-- 얼굴 이미지 여러 장 -->
+        <label>모자이크 제외 얼굴 사진 (여러 장 가능)</label>
+
+        <input
+            type="file"
+            name="face_images"
+            accept="image/*"
+            multiple
+        >
+
+        <!-- 번호판 -->
+        <label>모자이크 제외 번호판</label>
+
+        <input
+            type="text"
+            name="plate_number"
+            placeholder="예: 123가4567"
+        >
+
+        <!-- 실행 버튼 -->
+        <button type="submit">
+            영상 처리 시작
+        </button>
+
+    </form>
+
+    <!-- 메시지 -->
+    {% if message %}
+
+    <div class="message">
+        {{ message }}
+    </div>
+
+    {% endif %}
+
+    <!-- 결과 영상 -->
+    {% if video_url %}
+
+    <div class="result">
+
+        <h2>처리 결과 영상</h2>
+
+        <video controls>
+            <source src="{{ video_url }}" type="video/mp4">
+        </video>
+
+        <a class="download" href="{{ video_url }}" download>
+            결과 영상 다운로드
+        </a>
+
+    </div>
+
+    {% endif %}
+
+</div>
+
+</body>
+</html>

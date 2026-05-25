@@ -574,6 +574,10 @@ def process_video(
         last_face_blur_boxes = []
         face_hold_left = 0
 
+        last_plate_blur_boxes = [] #추가
+        plate_hold_left = 0
+        plate_hold_frames = 30 ###
+
         for rec in frames_store:
             idx = rec["idx"]
             frame = rec["frame"].copy()
@@ -607,6 +611,16 @@ def process_video(
                 # 앞 프레임도 모자이크 해제
                 if lane not in final_registered_lanes:
                     plate_blur_boxes.append(bbox)
+
+            if plate_blur_boxes:                                    ##추가2
+                last_plate_blur_boxes = plate_blur_boxes[:]
+                plate_hold_left = plate_hold_frames
+
+            elif plate_hold_left > 0 and last_plate_blur_boxes:
+                plate_blur_boxes = last_plate_blur_boxes[:]
+                plate_hold_left -= 1                                ###
+
+
 
             if face_blur_boxes:
                 frame = apply_mosaic(frame, face_blur_boxes, mode=mode, pixelate_scale=pixelate_scale)
